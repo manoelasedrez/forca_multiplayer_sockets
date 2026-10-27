@@ -1,4 +1,5 @@
 # Forca Multiplayer — guia rápido
+<img width="900" height="600" alt="image" src="https://github.com/user-attachments/assets/d263ea46-0725-4bc6-84ff-a94db014c4d1" />
 
 Jogo de forca em rede (cliente-servidor, TCP, Python). Este arquivo é só para quem clonou o repositório e quer rodar o jogo rápido.
 
