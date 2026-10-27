@@ -3,7 +3,7 @@ import sys
 import threading
 import time
 from protocol import protocol
-from nacl.public import PrivateKey, PublicKey
+from nacl.public import Box, PrivateKey, PublicKey
 from nacl.encoding import Base64Encoder
 
 HOST = "127.0.0.1"  # padrao: servidor na mesma maquina
@@ -81,6 +81,7 @@ class Client(socket.socket):
         self.private_key = None
 
         self.server_public_key = None  # Chave publica recebida do servidor
+        self.box = None  # Cifra as mensagens depois do CONNECT OK
         self.categorias = []  # Categorias do banco, recebidas no CONNECT OK
 
         self.sala_id = None  # Id da sala atual
@@ -154,6 +155,8 @@ class Client(socket.socket):
 
         if isinstance(resposta, protocol.ConnectOk):
             self.server_public_key = PublicKey(resposta.public_key, encoder=Base64Encoder)
+            # A partir daqui, tudo vai cifrado: chave privada do cliente + publica do servidor
+            self.box = Box(self.private_key, self.server_public_key)
             self.categorias = resposta.categorias
             self.print("Conexão com o servidor estabelecida")
             return True
@@ -168,7 +171,7 @@ class Client(socket.socket):
     def receber_mensagens_thread(self):
         while True:
             try:
-                mensagem = protocol.receive_message(self)
+                mensagem = protocol.receive_message(self, self.box)
 
             except protocol.ErroProtocolo as e:
                 # Mensagem malformada do servidor: ignora e continua
@@ -670,7 +673,7 @@ class Client(socket.socket):
     def enviar(self, mensagem):
         # Devolve False se nao conseguiu enviar (servidor caiu)
         try:
-            protocol.send_message(self, mensagem)
+            protocol.send_message(self, mensagem, self.box)
             return True
         except OSError as e:
             self.perder_conexao(e)

@@ -1,18 +1,25 @@
 """
-Mensagens do protocolo forca1.0 (versao simples).
+Mensagens do protocolo forca1.1.
 
-No fio, cada mensagem e:  <size: 4 bytes (struct "!I")> + <corpo em UTF-8>
+No fio, cada mensagem e:  <size: 4 bytes (struct "!I")> + <corpo>
 O size e o tamanho do corpo (nao conta os 4 bytes do size).
-O corpo e texto: 1a linha = comando, demais = "chave: valor", cada linha termina com \r\n.
+O corpo e texto UTF-8: 1a linha = comando, demais = "chave: valor", cada linha termina com \r\n.
 
-Enviar:   sock.sendall(RoomJoinRequest("abc").encode())
-Receber:  msg = receive_message(sock)
+Cifragem: CONNECT, CONNECT OK e CONNECT ERROR vao em texto puro (e nelas que as chaves
+publicas sao trocadas). Depois do CONNECT OK, o corpo de todas as mensagens vai cifrado
+com um nacl.public.Box (chave privada propria + chave publica do outro lado).
+
+Enviar:   send_message(sock, RoomJoinRequest("abc"), box)
+Receber:  msg = receive_message(sock, box)
+(box = None enquanto a conexao ainda nao foi aceita)
 """
 
 import struct
 
+from nacl.exceptions import CryptoError
+
 CRLF = "\r\n"
-VERSION = "forca1.0"
+VERSION = "forca1.1"
 
 # Maior corpo aceito, em bytes. As mensagens do jogo tem poucas centenas de bytes;
 # o limite evita que alguem anuncie um tamanho enorme e prenda o servidor lendo.
@@ -580,18 +587,41 @@ def receive_exact(sock, quantidade):
     return dados
 
 
-def receive_message(sock):
-    """Le uma mensagem inteira do socket.
+def receive_message(sock, box=None):
+    """Le uma mensagem inteira do socket. Com box, decifra o corpo antes de interpretar.
     Lanca ErroTamanho (encerrar a conexao) ou ErroProtocolo (pode continuar)."""
     tamanho = struct.unpack("!I", receive_exact(sock, 4))[0]
     if tamanho > MAX_TAMANHO_MENSAGEM:
         raise ErroTamanho(f"mensagem de {tamanho} bytes (limite {MAX_TAMANHO_MENSAGEM})")
     corpo = receive_exact(sock, tamanho)
+    if box is not None:
+        corpo = decifrar(corpo, box)
     return decode(corpo)
 
 
-def send_message(sock, msg: Message):
-    """Envia uma mensagem (objeto Message) pelo socket."""
+def cifrar(corpo, box):
+    """Corpo em claro -> nonce (24 bytes) + corpo cifrado + autenticacao (16 bytes)."""
+    return bytes(box.encrypt(corpo))
+
+
+def decifrar(corpo, box):
+    """Desfaz o cifrar(). Corpo alterado, cifrado com outra chave ou em claro -> ErroProtocolo."""
+    try:
+        return box.decrypt(corpo)
+    except (CryptoError, ValueError):
+        raise ErroProtocolo("mensagem nao pode ser decifrada")
+
+
+def encode_message(msg, box=None):
+    """Mensagem -> bytes prontos para o socket (tamanho + corpo, cifrado se houver box)."""
+    corpo = msg.to_text().encode("utf-8")
+    if box is not None:
+        corpo = cifrar(corpo, box)
+    return struct.pack("!I", len(corpo)) + corpo
+
+
+def send_message(sock, msg: Message, box=None):
+    """Envia uma mensagem (objeto Message) pelo socket. Com box, o corpo vai cifrado."""
     if not isinstance(msg, Message):
         raise ValueError("msg deve ser uma instancia de Message")
-    sock.sendall(msg.encode())
+    sock.sendall(encode_message(msg, box))

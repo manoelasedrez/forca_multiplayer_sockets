@@ -8,7 +8,7 @@ from nacl.exceptions import CryptoError
 from protocol import protocol
 from servidor import banco_palavras
 import random
-from nacl.public import PrivateKey, PublicKey
+from nacl.public import Box, PrivateKey, PublicKey
 
 HOST = "0.0.0.0"  # aceita conexoes de qualquer interface (rede local)
 PORT = 38905
@@ -212,6 +212,9 @@ class Server(socket.socket):
         self.private_key = None
 
         self.clientes = {}
+        # Box de cada conexao aceita (socket -> nacl.public.Box). Sem Box, a conexao
+        # ainda nao passou do CONNECT e as mensagens vao em texto puro.
+        self.boxes = {}
 
         self.users = {}  # Dicionário para armazenar informações dos usuários conectados
 
@@ -287,12 +290,13 @@ class Server(socket.socket):
                     pass
                 cliente["socket"].close()
             self.clientes.clear()
+            self.boxes.clear()
         self.close()
 
     def handle_cliente(self, conn, id):
         while True:
             try:
-                mensagem = protocol.receive_message(conn)
+                mensagem = protocol.receive_message(conn, self.boxes.get(conn))
                 self.print(f"[{self.nome(id)}] {mensagem.first_line()}")
 
             except protocol.ErroProtocolo as e:
@@ -336,8 +340,8 @@ class Server(socket.socket):
                 self.responder(conn, protocol.ConnectError(erro + "\r\n"))
                 return
             try:
-                # Guardada para a futura cifragem das mensagens
                 chave_cliente = PublicKey(mensagem.public_key, encoder=Base64Encoder)
+                box = Box(self.private_key, chave_cliente)
             except (CryptoError, ValueError, TypeError):
                 self.responder(conn, protocol.ConnectError("chave publica invalida\r\n"))
                 return
@@ -345,10 +349,13 @@ class Server(socket.socket):
                 "name": mensagem.username,
                 "public_key": chave_cliente
                 }
+            # O CONNECT OK vai em texto puro: o cliente ainda precisa da chave do servidor
             chave_texto = self.public_key.encode(encoder=Base64Encoder).decode()
             resposta = protocol.ConnectOk(chave_texto, self.categorias)
             protocol.send_message(conn, resposta)
-            self.print(f"Conexão com {id} estabelecida. Usuário: {mensagem.username}")
+            # A partir daqui, tudo nesta conexao vai cifrado
+            self.boxes[conn] = box
+            self.print(f"Conexão com {id} estabelecida. Usuário: {mensagem.username} (mensagens cifradas)")
             return
 
         # Qualquer outra mensagem exige CONNECT antes
@@ -377,7 +384,8 @@ class Server(socket.socket):
                       f"{mensagem.first_line()} nao e uma mensagem do cliente")
 
     def responder(self, conn, mensagem):
-        protocol.send_message(conn, mensagem)
+        # Cifra com a Box da conexao, se ela ja passou do CONNECT
+        protocol.send_message(conn, mensagem, self.boxes.get(conn))
 
     def erro(self, conn, codigo, texto):
         self.responder(conn, protocol.ErrorMessage(codigo, texto))
@@ -735,7 +743,10 @@ class Server(socket.socket):
                 self.sair_sala(id, sala)
 
             if id in self.clientes:
-                self.clientes[id]["socket"].close()
+                conn = self.clientes[id]["socket"]
+                if conn in self.boxes:
+                    del self.boxes[conn]
+                conn.close()
                 del self.clientes[id]
             if id in self.users:
                 del self.users[id]

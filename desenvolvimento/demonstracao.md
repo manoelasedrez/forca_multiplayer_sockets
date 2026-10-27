@@ -75,18 +75,39 @@ O cliente normal só envia mensagens corretas. Para mostrar como o servidor reag
 python3 desenvolvimento/testes/cliente_bruto.py [endereco] [porta]
 ```
 
-Ele conecta, executa cada caso abaixo e mostra a resposta do servidor:
+Ele conecta, executa cada caso abaixo e mostra a resposta do servidor. Depois do `CONNECT` aceito, ele cifra os corpos com a chave da conexão (como o cliente normal), para o servidor conseguir decifrá-los e avaliar o conteúdo:
 
 | Caso | Resposta esperada |
 | --- | --- |
 | Pedido antes do `CONNECT` | `ERROR` `NAO_CONECTADO` |
+| `CONNECT` com a versão antiga (`forca1.0`, sem cifragem) | `CONNECT ERROR` `versao nao suportada, use forca1.1` |
 | `CONNECT` com chave pública inválida | `CONNECT ERROR` `chave publica invalida` |
+| Pedido válido, mas enviado sem cifrar depois do `CONNECT` | `ERROR` `MENSAGEM_INVALIDA` ("nao pode ser decifrada"), conexão continua |
+| Pedido cifrado com a chave de outra pessoa | `ERROR` `MENSAGEM_INVALIDA`, conexão continua |
+| Pedido cifrado e adulterado no caminho (um bit trocado) | `ERROR` `MENSAGEM_INVALIDA`, conexão continua |
 | Comando desconhecido (`PULAR VEZ`) | `ERROR` `MENSAGEM_INVALIDA`, conexão continua |
 | `ROOM JOIN` sem `room-id` | `ERROR` `MENSAGEM_INVALIDA`, conexão continua |
 | Corpo que não é UTF-8 | `ERROR` `MENSAGEM_INVALIDA`, conexão continua |
 | Mensagem que só o servidor envia (`ROOM CREATE OK`) | `ERROR` `MENSAGEM_INVALIDA` |
 | `CONNECT` repetido | `ERROR` `JA_CONECTADO` |
 | Tamanho anunciado de 2 GB | `ERROR` `MENSAGEM_INVALIDA` e a conexão é fechada |
+
+## 5.1. Cifragem
+
+Para mostrar que o tráfego vai cifrado:
+
+1. **Log do servidor:** cada conexão aceita aparece como `Conexão com ... estabelecida. Usuário: ana (mensagens cifradas)`.
+2. **Captura de tráfego** (Linux, com permissão de administrador), durante uma partida:
+
+   ```
+   sudo tcpdump -i any -A port 38905
+   ```
+
+   Só o `CONNECT` e o `CONNECT OK` aparecem legíveis, com as chaves públicas em Base64. Todo o resto (salas, letras, palpites, placar) aparece como bytes sem sentido. O Wireshark mostra o mesmo, com filtro `tcp.port == 38905`.
+3. **Casos 5 a 7 do cliente bruto:** mensagem em claro, cifrada com outra chave e adulterada. As três são recusadas e a conexão continua.
+4. **Teste automatizado:** `python3 -m unittest discover desenvolvimento/testes -k cifr -k claro -k adulterada` verifica que os bytes no fio não contêm o texto, que cada cliente tem sua própria chave e que mensagens em claro, com outra chave ou adulteradas são recusadas.
+
+**O que explicar:** troca de chaves públicas no `CONNECT`; cada lado combina a própria chave privada com a pública do outro e chega à mesma chave secreta (Diffie-Hellman) sem que ela trafegue; o `Box` cifra e autentica cada corpo, com um nonce aleatório por mensagem ([protocolo.md](../entrega/protocolo.md), seção 7).
 
 ## 6. Novas conexões e novas partidas
 
@@ -111,7 +132,10 @@ python3 -m unittest discover desenvolvimento/testes
 | Por que threads e não `select`? O que o Lock protege? | [arquitetura.md](arquitetura.md), seção 4 |
 | O que acontece se um jogador cair na vez dele? | `sair_sala` em `entrega/servidor/server.py` |
 | Como o turno expira? | `enviar_turno` e `tempo_esgotado` em `entrega/servidor/server.py` |
-| Para que serve o PyNaCl? | [protocolo.md](../entrega/protocolo.md), seção 7 |
+| Para que serve o PyNaCl? Como funciona a cifragem? | [protocolo.md](../entrega/protocolo.md), seção 7; `cifrar` e `decifrar` em `entrega/protocol/protocol.py` |
+| Por que o `CONNECT` não é cifrado? | É nele que as chaves públicas são trocadas: antes disso, nenhum lado tem a chave do outro |
+| A chave privada trafega? | Não. Só as públicas; a chave secreta de cada conexão é calculada dos dois lados (Curve25519) |
+| A cifragem tem limitações? | Sim: não confere a identidade do servidor (*man-in-the-middle*) nem impede reenvio de mensagens capturadas ([protocolo.md](../entrega/protocolo.md), seção 7.6) |
 
 ## Gerar o pacote de entrega
 

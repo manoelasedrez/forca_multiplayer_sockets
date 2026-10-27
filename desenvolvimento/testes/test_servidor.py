@@ -10,7 +10,7 @@ import time
 import unittest
 
 from nacl.encoding import Base64Encoder
-from nacl.public import PrivateKey
+from nacl.public import Box, PrivateKey, PublicKey
 
 import caminho_entrega  # noqa: F401 (precisa vir antes do codigo do jogo)
 from protocol import protocol
@@ -32,17 +32,35 @@ class ClienteTeste:
     def __init__(self, porta):
         self.sock = socket.create_connection(("127.0.0.1", porta))
         self.sock.settimeout(3)
+        self.box = None  # cifra as mensagens depois do CONNECT OK
+        self.chave_servidor = None
 
     def conectar(self, nome, versao=protocol.VERSION):
-        chave = PrivateKey.generate().public_key.encode(encoder=Base64Encoder).decode()
-        self.enviar(protocol.ConnectRequest(chave, nome, versao))
-        return self.receber()
+        chave = PrivateKey.generate()
+        texto = chave.public_key.encode(encoder=Base64Encoder).decode()
+        self.enviar(protocol.ConnectRequest(texto, nome, versao))
+        resposta = self.receber()
+        if isinstance(resposta, protocol.ConnectOk):
+            self.chave_servidor = PublicKey(resposta.public_key, encoder=Base64Encoder)
+            self.box = Box(chave, self.chave_servidor)
+        return resposta
 
     def enviar(self, mensagem):
-        protocol.send_message(self.sock, mensagem)
+        protocol.send_message(self.sock, mensagem, self.box)
+
+    def enviar_corpo(self, corpo):
+        # Corpo montado a mao, cifrado se a conexao ja passou do CONNECT
+        if self.box is not None:
+            corpo = protocol.cifrar(corpo, self.box)
+        self.sock.sendall(struct.pack("!I", len(corpo)) + corpo)
 
     def receber(self):
-        return protocol.receive_message(self.sock)
+        return protocol.receive_message(self.sock, self.box)
+
+    def receber_bruto(self):
+        # Le o proximo quadro sem decifrar (para conferir que o trafego vai cifrado)
+        tamanho = struct.unpack("!I", protocol.receive_exact(self.sock, 4))[0]
+        return protocol.receive_exact(self.sock, tamanho)
 
     def esperar(self, tipo):
         # Le mensagens ate chegar uma do tipo pedido
@@ -126,6 +144,7 @@ class TestServidor(unittest.TestCase):
         cliente = ClienteTeste(self.servidor.port)
         self.clientes.append(cliente)
         self.assertIsInstance(cliente.conectar("bob", "forca2.0"), protocol.ConnectError)
+        self.assertIsInstance(cliente.conectar("bob", "forca1.0"), protocol.ConnectError)  # versao sem cifragem
 
     def test_mensagem_antes_do_connect(self):
         cliente = ClienteTeste(self.servidor.port)
@@ -335,7 +354,7 @@ class TestServidor(unittest.TestCase):
     def test_corpo_malformado_nao_derruba_a_conexao(self):
         ana = self.novo_cliente("ana")
         for corpo in [b"PULAR VEZ\r\n", b"ROOM JOIN\r\n", b"\xff\xfe", b""]:
-            ana.sock.sendall(struct.pack("!I", len(corpo)) + corpo)
+            ana.enviar_corpo(corpo)
             self.assertEqual(ana.esperar_erro(), protocol.MENSAGEM_INVALIDA)
         self.criar_sala(ana)
 
@@ -348,6 +367,52 @@ class TestServidor(unittest.TestCase):
             ana.receber()  # o servidor fechou a conexao
         time.sleep(0.2)
         self.assertIsNone(self.servidor.get_sala(codigo))  # e tratou como desconexao
+
+    # -----------------------------------------------------------
+    # Cifragem
+    # -----------------------------------------------------------
+    def test_trafego_cifrado(self):
+        ana = self.novo_cliente("ana")
+        # Pedido: o que vai no fio nao contem o texto da mensagem
+        pedido = protocol.RoomCreateRequest(2, "easy", "Sala Secreta", 1, "Frutas")
+        no_fio = protocol.encode_message(pedido, ana.box)
+        self.assertNotIn(b"ROOM CREATE", no_fio)
+        self.assertNotIn(b"Sala Secreta", no_fio)
+        ana.sock.sendall(no_fio)
+        # Resposta: chega cifrada, e so a Box da ana abre
+        corpo = ana.receber_bruto()
+        self.assertNotIn(b"ROOM CREATE OK", corpo)
+        self.assertTrue(protocol.decifrar(corpo, ana.box).startswith(b"ROOM CREATE OK"))
+
+    def test_cifragem_diferente_por_cliente(self):
+        # Cada cliente tem sua Box: a de um nao abre as mensagens do outro
+        ana = self.novo_cliente("ana")
+        bob = self.novo_cliente("bob")
+        ana.enviar(protocol.RoomCreateRequest(2, "easy", "Sala", 1, "Frutas"))
+        corpo = ana.receber_bruto()
+        with self.assertRaises(protocol.ErroProtocolo):
+            protocol.decifrar(corpo, bob.box)
+
+    def test_mensagem_em_claro_depois_do_connect(self):
+        ana = self.novo_cliente("ana")
+        ana.sock.sendall(protocol.RoomJoinRequest("ZZZZ").encode())  # sem cifrar
+        self.assertEqual(ana.esperar_erro(), protocol.MENSAGEM_INVALIDA)
+        self.criar_sala(ana)  # a conexao continua funcionando
+
+    def test_mensagem_cifrada_com_outra_chave(self):
+        ana = self.novo_cliente("ana")
+        intruso = Box(PrivateKey.generate(), ana.chave_servidor)
+        ana.sock.sendall(protocol.encode_message(protocol.RoomJoinRequest("ZZZZ"), intruso))
+        self.assertEqual(ana.esperar_erro(), protocol.MENSAGEM_INVALIDA)
+        self.criar_sala(ana)
+
+    def test_mensagem_adulterada(self):
+        ana = self.novo_cliente("ana")
+        dados = bytearray(protocol.encode_message(protocol.RoomJoinRequest("ZZZZ"), ana.box))
+        dados[-1] = dados[-1] ^ 1  # troca um bit do corpo cifrado
+        ana.sock.sendall(bytes(dados))
+        self.assertEqual(ana.esperar_erro(), protocol.MENSAGEM_INVALIDA)
+        self.criar_sala(ana)
 
     # -----------------------------------------------------------
     # Operacoes simultaneas
