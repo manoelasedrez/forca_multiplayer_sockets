@@ -2,6 +2,7 @@ import struct
 import unittest
 
 import caminho_entrega  # noqa: F401 (precisa vir antes do codigo do jogo)
+from nacl.public import Box, PrivateKey
 from protocol import protocol
 
 
@@ -94,6 +95,42 @@ class TestRecebimento(unittest.TestCase):
         sock = SocketFalso(struct.pack("!I", protocol.MAX_TAMANHO_MENSAGEM + 1) + b"abc")
         with self.assertRaises(protocol.ErroTamanho):
             protocol.receive_message(sock)
+
+    def test_mensagem_cifrada(self):
+        cliente = PrivateKey.generate()
+        servidor = PrivateKey.generate()
+        box_cliente = Box(cliente, servidor.public_key)
+        box_servidor = Box(servidor, cliente.public_key)
+
+        dados = protocol.encode_message(protocol.RoomJoinRequest("K7XP"), box_cliente)
+        self.assertNotIn(b"ROOM JOIN", dados)
+        self.assertNotIn(b"K7XP", dados)
+        # O tamanho continua em claro e conta o corpo cifrado (40 bytes a mais)
+        tamanho = struct.unpack("!I", dados[:4])[0]
+        self.assertEqual(tamanho, len(dados) - 4)
+        self.assertEqual(tamanho, len(protocol.RoomJoinRequest("K7XP").encode()) - 4 + 40)
+
+        recebida = protocol.receive_message(SocketFalso(dados), box_servidor)
+        self.assertEqual(recebida.room_id, "K7XP")
+
+    def test_mesma_mensagem_cifra_diferente(self):
+        # O nonce e aleatorio: a mesma mensagem nunca gera os mesmos bytes
+        box = Box(PrivateKey.generate(), PrivateKey.generate().public_key)
+        m = protocol.RoomJoinRequest("K7XP")
+        self.assertNotEqual(protocol.encode_message(m, box), protocol.encode_message(m, box))
+
+    def test_decifrar_falha(self):
+        a = PrivateKey.generate()
+        b = PrivateKey.generate()
+        box = Box(a, b.public_key)
+        outra = Box(PrivateKey.generate(), b.public_key)
+        cifrado = protocol.cifrar(b"ROOM JOIN\r\nroom-id: K7XP\r\n", box)
+        adulterado = cifrado[:-1] + bytes([cifrado[-1] ^ 1])
+        for corpo in [b"ROOM JOIN\r\n", adulterado, b"curto"]:
+            with self.assertRaises(protocol.ErroProtocolo):
+                protocol.decifrar(corpo, box)
+        with self.assertRaises(protocol.ErroProtocolo):
+            protocol.decifrar(cifrado, outra)
 
     def test_conexao_fechada_no_meio(self):
         sock = SocketFalso(struct.pack("!I", 50) + b"ROOM")

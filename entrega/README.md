@@ -29,6 +29,8 @@ Ao fim das rodadas, vence quem tiver mais pontos (empates dividem a vitória). A
 
 O servidor é a autoridade do jogo: guarda a palavra, valida cada jogada, recusa ações inválidas, controla os prazos e mantém todos os jogadores sincronizados. Também trata mensagens malformadas e desconexões; se um jogador sair, a partida continua com os demais, ou é encerrada se sobrar só um.
 
+Toda a comunicação depois da identificação é **cifrada** com chaves públicas e privadas (PyNaCl): quem observa a rede não vê salas, letras, palpites nem placar.
+
 Regras completas: [regras.md](regras.md).
 
 ## Arquitetura
@@ -64,6 +66,7 @@ Custo aceito: o servidor é um ponto único de falha. Se ele cair, as partidas e
 | --- | --- |
 | Pedido contra as regras (fora da vez, sala cheia...) | `ERROR` com um código; nada muda no servidor |
 | Mensagem malformada ou fora do protocolo | `ERROR` com `MENSAGEM_INVALIDA`; a conexão continua |
+| Mensagem que não pode ser decifrada (em claro, com outra chave ou alterada) | `ERROR` com `MENSAGEM_INVALIDA`; a mensagem é descartada e a conexão continua |
 | Mensagem acima de 16 KB | `ERROR` e fechamento da conexão (não há como achar a próxima mensagem no fluxo) |
 | Falha inesperada no servidor | `ERROR` com `ERRO_INTERNO`; a conexão continua |
 | Cliente sai ou a conexão cai | O jogador sai da sala: a vez passa, o dono é transferido e a partida é interrompida se sobrar um |
@@ -85,7 +88,15 @@ Detalhes de cada caso: [protocolo.md](protocolo.md), seção 5.
 
 Usar UDP obrigaria a reimplementar justamente o que o TCP oferece.
 
-Sobre o TCP roda um **protocolo de aplicação próprio** (forca1.0). Como o TCP entrega um fluxo de bytes sem fronteiras entre mensagens, cada mensagem é precedida pelo seu tamanho em 4 bytes; o corpo é texto com um comando e atributos `chave: valor`. Especificação completa: [protocolo.md](protocolo.md).
+Sobre o TCP roda um **protocolo de aplicação próprio** (forca1.1). Como o TCP entrega um fluxo de bytes sem fronteiras entre mensagens, cada mensagem é precedida pelo seu tamanho em 4 bytes; o corpo é texto com um comando e atributos `chave: valor`. Especificação completa: [protocolo.md](protocolo.md).
+
+### Cifragem
+
+- No `CONNECT` e no `CONNECT OK`, que vão em texto puro, cliente e servidor trocam suas **chaves públicas** (Curve25519). As chaves privadas nunca saem de cada máquina.
+- Depois disso, o corpo de **todas** as mensagens, nos dois sentidos, vai cifrado com o `Box` do PyNaCl. Cada lado combina a própria chave privada com a pública do outro, e os dois chegam à mesma chave secreta sem que ela trafegue.
+- O `Box` cifra (XSalsa20) e autentica (Poly1305): uma mensagem alterada no caminho, ou cifrada com outra chave, é detectada e descartada. Cada conexão tem sua própria chave.
+- Os 4 bytes de tamanho continuam em claro; cada corpo cifrado tem 40 bytes a mais (nonce e autenticação).
+- Limitação: o cliente não confere a identidade do servidor, então um atacante que intercepte a conexão desde o início poderia trocar as chaves (*man-in-the-middle*). Detalhes e demais limitações: [protocolo.md](protocolo.md), seção 7.
 
 ## Bibliotecas
 
@@ -95,7 +106,7 @@ Sobre o TCP roda um **protocolo de aplicação próprio** (forca1.0). Como o TCP
 | `struct` | Padrão | Prefixo de tamanho das mensagens |
 | `threading` | Padrão | Threads, `Lock` e `Timer` |
 | `json`, `random`, `os`, `sys`, `time` | Padrão | Banco de palavras, sorteios, argumentos e pausas |
-| [PyNaCl](https://pypi.org/project/PyNaCl/) 1.5.0 | **Externa** | Gera e troca chaves públicas no `CONNECT`, como preparação para a cifragem das mensagens, que está planejada. Não substitui nem abstrai os sockets. |
+| [PyNaCl](https://pypi.org/project/PyNaCl/) 1.5.0 | **Externa** | Criptografia: gera os pares de chaves e cifra e decifra o corpo das mensagens (`Box`). Só transforma bytes; o envio e o recebimento são feitos com `socket`, que ela não substitui nem abstrai. |
 
 ## Dependências
 
@@ -144,6 +155,7 @@ Abra um servidor e três clientes (Ana, Bob e Caio) e siga os passos abaixo. O l
 4. **Desconexão:** feche o terminal de Bob na vez dele (a vez passa a Caio e os pontos de Bob saem do placar); depois feche o da Ana (Caio vira dono e a partida termina como interrompida).
 5. **Nova partida e nova conexão:** ao fim, conecte um cliente novo, entre na sala e o dono inicia outra partida.
 6. **Queda do servidor:** encerre o servidor com Ctrl+C; os clientes avisam e encerram.
+7. **Cifragem (opcional):** capture o tráfego da porta 38905 (no Linux: `sudo tcpdump -i any -A port 38905`, ou com o Wireshark) durante uma partida. Só o `CONNECT` e o `CONNECT OK` aparecem legíveis; o resto são bytes sem sentido. O log do servidor mostra "(mensagens cifradas)" em cada conexão aceita.
 
 ## Estrutura
 

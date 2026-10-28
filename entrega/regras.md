@@ -31,13 +31,14 @@ Definidas no início de `servidor/server.py`.
 
 - O jogador se conecta e informa um **nome de usuário**.
 - A conexão é recusada se:
-  - a versão do protocolo não for `forca1.0`;
+  - a versão do protocolo não for `forca1.1` (a `forca1.0`, sem cifragem, não é mais aceita);
   - o nome estiver vazio ou tiver mais de 15 caracteres;
   - o nome tiver `,`, `:` ou `=` (esses caracteres separam listas no protocolo);
   - o nome já estiver em uso por outro jogador conectado;
   - a chave pública enviada não for válida.
 - O nome identifica o jogador para todos: na lista da sala, na vez, no placar e nos vencedores.
 - Ao conectar, o jogador recebe a lista de **categorias** do banco de palavras.
+- Depois da identificação, toda a comunicação vai **cifrada** ([protocolo.md](protocolo.md), seção 7). Uma mensagem que não pode ser decifrada é descartada com `MENSAGEM_INVALIDA`, sem afetar o jogo.
 - Nenhuma outra ação é aceita antes da identificação (`NAO_CONECTADO`), e um segundo `CONNECT` na mesma conexão é recusado (`JA_CONECTADO`).
 - Mensagens malformadas ou fora do protocolo são recusadas com `MENSAGEM_INVALIDA` sem afetar o jogo ([protocolo.md](protocolo.md), seção 5).
 

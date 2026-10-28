@@ -1,7 +1,7 @@
 # Forca Multiplayer — guia rápido
 <img width="900" height="600" alt="image" src="https://github.com/user-attachments/assets/d263ea46-0725-4bc6-84ff-a94db014c4d1" />
 
-Jogo de forca em rede (cliente-servidor, TCP, Python). Este arquivo é só para quem clonou o repositório e quer rodar o jogo rápido.
+Jogo de forca em rede (cliente-servidor, TCP, Python), com as mensagens cifradas por chaves públicas e privadas (PyNaCl). Este arquivo é só para quem clonou o repositório e quer rodar o jogo rápido.
 
 > A documentação oficial do trabalho, que vai para o professor, é o [entrega/README.md](entrega/README.md).
 
@@ -92,7 +92,7 @@ Na **raiz do repositório** (não dentro de `entrega/`):
 python3 -m unittest discover desenvolvimento/testes
 ```
 
-Devem passar 53 testes. Os avisos "Palavra ignorada" que aparecem são esperados.
+Devem passar 61 testes. Os avisos "Palavra ignorada" que aparecem são esperados.
 
 Para ver como o servidor reage a mensagens fora do protocolo (com o servidor rodando):
 
@@ -107,6 +107,7 @@ python3 desenvolvimento/testes/cliente_bruto.py
 | `ModuleNotFoundError: No module named 'protocol'` (ou `servidor`, `cliente`) | Rode o servidor e o cliente de dentro da pasta `entrega/`, com `python3 -m ...` |
 | `ModuleNotFoundError: No module named 'nacl'` | Ative o ambiente virtual e rode `pip install pynacl` |
 | `error: externally-managed-environment` no `pip install` | Use o ambiente virtual do passo 1 |
+| "versao nao suportada, use forca1.1" ao conectar | Cliente e servidor de versões diferentes: rode `git pull` para os dois usarem o mesmo código |
 | `Connection refused` no cliente | O servidor não está rodando, ou o IP/porta estão errados |
 | Funciona na mesma máquina, mas não pela rede | Libere a porta 38905 no firewall do servidor e confira se as máquinas estão na mesma rede |
 | Símbolos estranhos (`[32m`, `[2J`) no terminal | O terminal não suporta cores ANSI: use o Windows Terminal, ou mude `USAR_CORES` e `LIMPAR_TELA` para `False` em `entrega/cliente/client.py` |

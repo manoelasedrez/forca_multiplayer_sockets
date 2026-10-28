@@ -1,4 +1,4 @@
-# Especificação do protocolo forca1.0
+# Especificação do protocolo forca1.1
 
 Este documento descreve o protocolo de aplicação usado entre o cliente e o servidor da Forca Multiplayer. Ele foi escrito para que seja possível implementar um cliente ou um servidor compatível **sem consultar o código-fonte**.
 
@@ -14,7 +14,7 @@ Sumário:
 4. [Sequências de interação](#4-sequências-de-interação)
 5. [Mensagens inválidas e erros](#5-mensagens-inválidas-e-erros)
 6. [Códigos de erro](#6-códigos-de-erro)
-7. [Cifragem (planejada)](#7-cifragem-planejada)
+7. [Cifragem](#7-cifragem)
 
 ---
 
@@ -26,9 +26,11 @@ Sumário:
 | Arquitetura | Cliente-servidor. Os clientes só falam com o servidor, nunca entre si. |
 | Porta padrão | `38905` (se estiver ocupada, o servidor tenta a seguinte) |
 | Conexões por cliente | Uma, mantida aberta durante toda a sessão |
-| Versão | `forca1.0` |
+| Versão | `forca1.1` (a 1.0 não tinha cifragem e não é mais aceita) |
+| Cifragem | Corpo das mensagens cifrado com PyNaCl (`Box`) depois do `CONNECT OK` (seção 7) |
 
 - O cliente abre a conexão e envia `CONNECT` como **primeira** mensagem. Até o `CONNECT` ser aceito, qualquer outro pedido é recusado com `NAO_CONECTADO`.
+- No `CONNECT` e no `CONNECT OK`, cliente e servidor trocam suas chaves públicas. A partir daí, **todas as mensagens, nos dois sentidos, vão cifradas** (seção 7).
 - A conexão fica aberta enquanto o jogador usa o jogo. As mensagens vão nos dois sentidos a qualquer momento: além de responder aos pedidos, o servidor envia **eventos** (por exemplo, "é a vez de Bob") sem que o cliente peça.
 - Fechar a conexão equivale a sair da sala em que o jogador estiver (seção 4.7).
 - O servidor ativa o *keepalive* do TCP em cada conexão: um cliente que some sem fechar a conexão (cabo desligado, máquina travada) é detectado em cerca de 25 segundos e tratado como desconexão.
@@ -42,18 +44,18 @@ O TCP entrega um fluxo contínuo de bytes, sem marcar onde uma mensagem termina 
 ```
 +--------------------------+-----------------------------+
 | tamanho (4 bytes)        | corpo (tamanho bytes)       |
-| inteiro sem sinal,       | texto UTF-8                 |
-| big-endian               |                             |
+| inteiro sem sinal,       | texto UTF-8, cifrado depois |
+| big-endian               | do CONNECT OK (seção 7)     |
 +--------------------------+-----------------------------+
 ```
 
-- O **tamanho** conta apenas o corpo, sem os 4 bytes do próprio tamanho.
+- O **tamanho** conta apenas o corpo, sem os 4 bytes do próprio tamanho. O tamanho nunca é cifrado; depois do `CONNECT OK`, ele conta o corpo **já cifrado**.
 - O tamanho máximo do corpo é **16384 bytes** (`MAX_TAMANHO_MENSAGEM`). As mensagens do jogo têm poucas centenas de bytes.
 - Quem recebe lê exatamente 4 bytes, depois lê exatamente `tamanho` bytes. Uma única leitura do socket pode devolver menos bytes do que o pedido, então a leitura é repetida até completar.
 
 ### 2.2. Corpo
 
-O corpo é texto em UTF-8, dividido em linhas terminadas por `\r\n`:
+O corpo, **antes da cifragem** (ou depois de decifrado), é texto em UTF-8, dividido em linhas terminadas por `\r\n`:
 
 ```
 COMANDO\r\n
@@ -68,7 +70,7 @@ chave2: valor2\r\n
 - O valor vai até o fim da linha e pode conter `:`. Não pode conter `\r\n`.
 - Uma mensagem sem atributos tem só a 1ª linha.
 
-Exemplo completo de uma mensagem `ROOM JOIN`, em bytes:
+Exemplo completo de uma mensagem `ROOM JOIN` em claro, em bytes (depois do `CONNECT OK`, este corpo de 26 bytes vai cifrado e passa a ter 66 bytes; seção 7.3):
 
 ```
 00 00 00 1A                         tamanho = 26
@@ -130,33 +132,33 @@ Todo pedido recusado recebe `ERROR` (seção 3.11), exceto o `CONNECT`, que é r
 
 #### `CONNECT <versão>` (C→S)
 
-Primeira mensagem do cliente. Identifica o jogador. A versão vai na 1ª linha: `CONNECT forca1.0`.
+Primeira mensagem do cliente. Identifica o jogador e envia a chave pública dele. A versão vai na 1ª linha: `CONNECT forca1.1`. Vai **em texto puro**.
 
 | Atributo | Tipo | Significado |
 | --- | --- | --- |
-| `public-key` | Texto | Chave pública Curve25519 do cliente (32 bytes), em Base64. Reservada para a cifragem (seção 7). Precisa ser uma chave válida. |
+| `public-key` | Texto | Chave pública Curve25519 do cliente (32 bytes), em Base64. O servidor a usa para cifrar e decifrar as mensagens desta conexão (seção 7). Precisa ser uma chave válida. |
 | `username` | Texto | Nome do jogador: de 1 a 15 caracteres, sem `,` `:` `=`, e diferente do nome de todos os jogadores conectados. |
 
-Respostas: `CONNECT OK`, `CONNECT ERROR` ou, se o cliente já estiver conectado, `ERROR` com `JA_CONECTADO`.
+Respostas: `CONNECT OK`, `CONNECT ERROR` ou, se o cliente já estiver conectado, `ERROR` com `JA_CONECTADO` (nesse caso o `CONNECT` repetido precisa vir cifrado, como qualquer mensagem depois do `CONNECT OK`).
 
 #### `CONNECT OK <versão>` (S→C)
 
-O jogador foi aceito. A partir daqui o cliente pode enviar os demais pedidos.
+O jogador foi aceito. Vai **em texto puro**, porque o cliente ainda não tem a chave do servidor. A partir daqui, o cliente pode enviar os demais pedidos, e tudo vai cifrado nos dois sentidos.
 
 | Atributo | Tipo | Significado |
 | --- | --- | --- |
-| `public-key` | Texto | Chave pública Curve25519 do servidor, em Base64. Reservada para a cifragem (seção 7). |
+| `public-key` | Texto | Chave pública Curve25519 do servidor, em Base64. O cliente a usa para cifrar e decifrar as mensagens desta conexão (seção 7). |
 | `categorias` | Lista | Categorias de palavras disponíveis no servidor. Usadas no `ROOM CREATE`. |
 
 #### `CONNECT ERROR <versão>` (S→C)
 
-O `CONNECT` foi recusado. Diferente das outras mensagens, depois da 1ª linha vem **um texto livre** com o motivo, sem atributos. A conexão continua aberta e o cliente pode enviar outro `CONNECT`.
+O `CONNECT` foi recusado. Vai **em texto puro**. Diferente das outras mensagens, depois da 1ª linha vem **um texto livre** com o motivo, sem atributos. A conexão continua aberta e o cliente pode enviar outro `CONNECT`.
 
 Motivos possíveis:
 
 | Texto | Causa |
 | --- | --- |
-| `versao nao suportada, use forca1.0` | A versão do `CONNECT` não é `forca1.0` |
+| `versao nao suportada, use forca1.1` | A versão do `CONNECT` não é `forca1.1` (inclusive a antiga `forca1.0`, sem cifragem) |
 | `nome de usuario deve ter de 1 a 15 caracteres` | Nome vazio ou longo demais |
 | `nome de usuario nao pode ter , : =` | Nome com caractere proibido |
 | `nome de usuario ja em uso` | Outro jogador conectado usa o mesmo nome |
@@ -357,7 +359,7 @@ A partida terminou. Logo depois vem um `ROOM UPDATE` (a sala pode iniciar outra 
 
 ### 3.11. `ERROR` (S→C)
 
-Um pedido foi recusado, ou a mensagem recebida era inválida. **Nada muda no servidor.** A conexão continua aberta, exceto no caso da seção 5.3.
+Um pedido foi recusado, ou a mensagem recebida era inválida. **Nada muda no servidor.** A conexão continua aberta, exceto no caso da seção 5.4. Depois do `CONNECT OK`, o `ERROR` também vai cifrado.
 
 | Atributo | Tipo | Significado |
 | --- | --- | --- |
@@ -370,8 +372,11 @@ Um pedido foi recusado, ou a mensagem recebida era inválida. **Nada muda no ser
 
 ```
 Cliente                         Servidor
-   │── CONNECT forca1.0 ──────────>│
-   │<───────── CONNECT OK forca1.0 ─│   (ou CONNECT ERROR: o cliente pode tentar de novo)
+   │── CONNECT forca1.1 ──────────>│   texto puro, com a chave pública do cliente
+   │<───────── CONNECT OK forca1.1 ─│   texto puro, com a chave pública do servidor
+   │                                │   (ou CONNECT ERROR: o cliente pode tentar de novo)
+   │══ demais mensagens ═══════════>│   cifradas, nos dois sentidos
+   │<══════════════════════════════│
 ```
 
 ### 4.2. Criar sala e entrar
@@ -478,7 +483,16 @@ O enquadramento está correto (o tamanho bate), mas o corpo não pode ser interp
 
 Resposta: `ERROR` com `MENSAGEM_INVALIDA` e a descrição do problema. Como o corpo foi lido inteiro, a próxima mensagem começa no lugar certo e **a conexão continua**.
 
-### 5.3. Tamanho acima do limite
+### 5.3. Mensagem que não pode ser decifrada
+
+Depois do `CONNECT OK`, o corpo não pôde ser decifrado. Exemplos:
+- a mensagem foi enviada em texto puro;
+- foi cifrada com outra chave;
+- foi alterada no caminho (a autenticação Poly1305 não confere).
+
+Resposta: `ERROR` com `MENSAGEM_INVALIDA` ("mensagem nao pode ser decifrada"), cifrado normalmente. A mensagem é descartada sem ser interpretada e **a conexão continua**.
+
+### 5.4. Tamanho acima do limite
 
 O tamanho anunciado passa de 16384 bytes.
 
@@ -486,20 +500,20 @@ O tamanho anunciado passa de 16384 bytes.
 - Motivo: o servidor não lê o corpo (seriam bytes demais), então não sabe onde começa a próxima mensagem e não consegue continuar lendo o fluxo.
 - O fechamento é tratado como desconexão (seção 4.7).
 
-### 5.4. Erro interno
+### 5.5. Erro interno
 
 Uma falha inesperada no servidor ao tratar um pedido. A resposta é `ERROR` com `ERRO_INTERNO`, e a conexão continua. Esse caso não deve acontecer; se acontecer, é um defeito a corrigir.
 
-### 5.5. Do lado do cliente
+### 5.6. Do lado do cliente
 
-- Uma mensagem malformada vinda do servidor é ignorada e o cliente avisa o jogador.
+- Uma mensagem malformada, ou que não pode ser decifrada, vinda do servidor é ignorada e o cliente avisa o jogador.
 - Se a conexão cai, o cliente avisa o jogador e encerra.
 
 ## 6. Códigos de erro
 
 | Código | Pedido | Quando |
 | --- | --- | --- |
-| `MENSAGEM_INVALIDA` | Qualquer um | Mensagem malformada ou acima do tamanho máximo (seção 5) |
+| `MENSAGEM_INVALIDA` | Qualquer um | Mensagem malformada, que não pode ser decifrada ou acima do tamanho máximo (seção 5) |
 | `ERRO_INTERNO` | Qualquer um | Falha inesperada do servidor |
 | `NAO_CONECTADO` | Qualquer um, exceto `CONNECT` | O cliente ainda não enviou um `CONNECT` aceito |
 | `JA_CONECTADO` | `CONNECT` | O cliente já está conectado |
@@ -525,14 +539,75 @@ Uma falha inesperada no servidor ao tratar um pedido. A resposta é `ERROR` com 
 | `LETRA_REPETIDA` | `TURN RESPONSE` (letra) | A letra já foi tentada na rodada (com ou sem acento) |
 | `PALPITE_INVALIDO` | `TURN RESPONSE` (palpite) | O palpite tem algo além de letras, espaço e hífen |
 
-## 7. Cifragem (planejada)
+## 7. Cifragem
 
-A cifragem das mensagens **ainda não está implementada**: hoje todo o tráfego vai em texto puro. O protocolo já está preparado para ela:
+### 7.1. Algoritmo e chaves
 
-- No `CONNECT` e no `CONNECT OK`, cliente e servidor trocam chaves públicas Curve25519 (biblioteca PyNaCl). O servidor já recusa uma chave inválida.
-- Plano para a próxima versão:
-  - `CONNECT`, `CONNECT OK` e `CONNECT ERROR` continuam em texto puro, porque é nelas que as chaves são trocadas.
-  - Depois do `CONNECT OK`, o **corpo** de todas as mensagens passa a ser cifrado com `nacl.public.Box` (chave privada própria + chave pública do outro lado). O `Box` inclui um *nonce* aleatório e uma etiqueta de autenticação, o que também impede que alguém altere a mensagem no caminho.
-  - O enquadramento não muda: os 4 bytes de tamanho continuam em claro e passam a contar o tamanho do corpo cifrado.
-  - Um corpo que não puder ser decifrado será tratado como mensagem malformada (seção 5.2).
-  - A versão do protocolo deverá mudar (por exemplo, `forca1.1`), para que cliente e servidor saibam se a cifragem está em uso.
+A cifragem usa a biblioteca **PyNaCl** (interface Python da libsodium), com a construção `Box`:
+
+| Parte | Algoritmo | Função |
+| --- | --- | --- |
+| Acordo de chaves | Curve25519 (Diffie-Hellman em curva elíptica) | Cada lado combina a **própria chave privada** com a **chave pública do outro** e chega à mesma chave secreta, sem que ela trafegue |
+| Cifra | XSalsa20 | Esconde o conteúdo do corpo |
+| Autenticação | Poly1305 | Detecta qualquer alteração e mensagens cifradas com outra chave |
+
+- O **servidor** gera um par de chaves (privada e pública) ao iniciar.
+- O **cliente** gera um par de chaves novo a cada conexão.
+- As chaves privadas **nunca** saem da máquina. Só as públicas trafegam, no `CONNECT` e no `CONNECT OK`, em Base64.
+- Cada conexão tem sua própria chave secreta: um cliente não consegue decifrar as mensagens de outro.
+
+### 7.2. O que vai cifrado
+
+| Mensagem | Cifrada? |
+| --- | --- |
+| `CONNECT`, `CONNECT OK`, `CONNECT ERROR` | Não (é nelas que as chaves são trocadas) |
+| `ERROR` com `NAO_CONECTADO` (pedido antes do `CONNECT` ser aceito) | Não (ainda não há chave) |
+| **Todas as demais**, nos dois sentidos, depois do `CONNECT OK` | **Sim** |
+
+Só o **corpo** é cifrado. Os 4 bytes de tamanho continuam em claro, para quem recebe saber quantos bytes ler.
+
+### 7.3. Formato do corpo cifrado
+
+```
++-----------+-----------------+------------------+------------------------------+
+| tamanho   | nonce           | autenticação     | texto cifrado                |
+| (4 bytes) | (24 bytes)      | Poly1305         | (mesmo tamanho do corpo      |
+|           | aleatório       | (16 bytes)       |  em claro)                   |
++-----------+-----------------+------------------+------------------------------+
+            |<------------------- corpo cifrado ------------------------------>|
+```
+
+- Corpo cifrado = corpo em claro **+ 40 bytes**. O `ROOM JOIN` de 26 bytes da seção 2.2 vira um corpo de 66 bytes.
+- O **nonce** é sorteado a cada mensagem e enviado junto. Por isso a mesma mensagem, enviada duas vezes, gera bytes diferentes.
+- O formato é o do `crypto_box_easy` da libsodium com o nonce na frente. Pode ser implementado em outra linguagem com qualquer biblioteca compatível com a libsodium.
+
+### 7.4. Passo a passo
+
+**Cliente:**
+1. Gera um par de chaves: `privada = PrivateKey.generate()`.
+2. Envia `CONNECT forca1.1` com `public-key` = chave pública em Base64 (em texto puro).
+3. Recebe `CONNECT OK` (em texto puro) e monta a caixa: `box = Box(privada, PublicKey(public_key_do_servidor))`.
+4. **Enviar:** monta o corpo em texto, cifra com `box.encrypt(corpo)` e envia `tamanho + corpo cifrado`.
+5. **Receber:** lê `tamanho` e o corpo, decifra com `box.decrypt(corpo)` e interpreta o texto.
+
+**Servidor:** faz o mesmo do outro lado. Ao aceitar o `CONNECT`, monta `Box(privada_do_servidor, PublicKey(public_key_do_cliente))`, envia o `CONNECT OK` em texto puro e, a partir daí, cifra e decifra tudo daquela conexão com essa caixa.
+
+### 7.5. Erros
+
+| Situação | Resultado |
+| --- | --- |
+| `public-key` inválida no `CONNECT` | `CONNECT ERROR` "chave publica invalida" |
+| Cliente da versão antiga (`forca1.0`, sem cifragem) | `CONNECT ERROR` "versao nao suportada, use forca1.1" |
+| Mensagem em claro, com outra chave ou alterada, depois do `CONNECT OK` | `ERROR` `MENSAGEM_INVALIDA`; a conexão continua (seção 5.3) |
+
+### 7.6. O que a cifragem garante
+
+**Garante:**
+- **Sigilo:** quem observa a rede vê apenas o `CONNECT`, o `CONNECT OK` e bytes aleatórios. Não vê salas, letras, palpites nem placar.
+- **Integridade:** uma mensagem alterada no caminho é detectada e descartada.
+- **Isolamento entre clientes:** cada conexão tem sua própria chave.
+
+**Não garante** (limitações conhecidas desta versão):
+- **Identidade do servidor:** a chave pública do servidor chega em texto puro e o cliente não a confere com nenhuma referência. Um atacante ativo que intercepte a conexão desde o início (*man-in-the-middle*) poderia trocar as chaves. Uma solução seria o cliente conhecer de antemão a chave pública do servidor.
+- **Repetição:** o servidor não guarda os nonces recebidos, então uma mensagem cifrada capturada pode ser reenviada. As regras do jogo limitam o efeito (uma letra repetida ou uma jogada fora da vez são recusadas), mas não o eliminam.
+- **Metadados:** o nome do jogador (no `CONNECT`) e o tamanho de cada mensagem continuam visíveis.

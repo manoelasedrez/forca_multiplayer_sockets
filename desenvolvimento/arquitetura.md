@@ -91,6 +91,7 @@ Todo o estado compartilhado (usuários, salas, partidas) é protegido por **um �
 | --- | --- |
 | Pedido que viola uma regra | `ERROR` com código; o estado não muda ([regras.md](../entrega/regras.md)) |
 | Mensagem malformada | `ERROR` com `MENSAGEM_INVALIDA`; a conexão continua ([protocolo.md](../entrega/protocolo.md), seção 5) |
+| Mensagem que não pode ser decifrada (em claro, outra chave, adulterada) | `ERROR` com `MENSAGEM_INVALIDA`; a mensagem é descartada e a conexão continua |
 | Tamanho anunciado acima de 16 KB | `ERROR` e fechamento da conexão, porque não há como achar a próxima mensagem |
 | Erro inesperado no servidor | `ERROR` com `ERRO_INTERNO`; a thread do cliente continua viva |
 | Cliente fecha a conexão ou ela cai | O `recv()` falha; o jogador sai da sala como se tivesse pedido (passa a vez, transfere o dono, interrompe a partida se sobrar um) |
@@ -99,14 +100,37 @@ Todo o estado compartilhado (usuários, salas, partidas) é protegido por **um �
 | Servidor cai | O cliente avisa o jogador e encerra |
 | Encerramento do servidor (Ctrl+C) | Cancela os timers e fecha todas as conexões com o Lock em mãos, para não competir com as threads dos clientes |
 
-## 6. Endereçamento
+## 6. Cifragem
+
+**Decisão:** cifrar o corpo de todas as mensagens depois do `CONNECT OK`, com o `Box` do PyNaCl (Curve25519 + XSalsa20 + Poly1305). Detalhes do formato em [protocolo.md](../entrega/protocolo.md), seção 7.
+
+**Onde fica no código:**
+
+| Parte | Onde |
+| --- | --- |
+| Cifrar e decifrar um corpo | `cifrar` e `decifrar` em `protocol/protocol.py` |
+| Enviar e receber com ou sem cifra | `send_message(sock, msg, box)` e `receive_message(sock, box)`: com `box = None`, texto puro |
+| Uma `Box` por conexão no servidor | `self.boxes` (socket → `Box`), criada ao aceitar o `CONNECT`, usada em `responder()` e em `handle_cliente()` |
+| `Box` do cliente | `self.box`, criada ao receber o `CONNECT OK`, usada em `enviar()` e na thread de recebimento |
+
+**Justificativa:**
+
+- **Por que chave pública, e não uma senha combinada.** Não há como os jogadores e o servidor combinarem um segredo antes. Com chaves públicas, cada lado manda só a sua chave pública, e o acordo Diffie-Hellman dá aos dois a mesma chave secreta sem que ela trafegue.
+- **Por que o `Box` e não montar a cifra à mão.** O `Box` junta cifra e autenticação numa operação só, com nonce aleatório. Montar isso à mão (escolher cifra, modo, nonce e autenticação) é fácil de errar.
+- **Por que só o corpo.** O tamanho precisa ficar em claro para quem recebe saber quantos bytes ler; o enquadramento continua igual ao da versão sem cifra.
+- **Por que o `CONNECT` em claro.** É nele que as chaves são trocadas; antes disso, nenhum lado tem a chave do outro.
+- **Concorrência:** a `Box` de uma conexão é usada pela thread daquele cliente (para decifrar o que chega) e pelas threads que enviam com o `Lock` em mãos (para cifrar). O `Box` não guarda estado entre chamadas (a chave secreta é fixa e cada mensagem sorteia o próprio nonce), então pode ser usado por duas threads ao mesmo tempo sem proteção extra.
+
+**Limitações** (registradas em [pendencias.md](pendencias.md)): o cliente não confere a identidade do servidor (*man-in-the-middle*) e o servidor não impede o reenvio de uma mensagem cifrada capturada.
+
+## 7. Endereçamento
 
 - O servidor escuta em `0.0.0.0` (todas as interfaces), na porta `38905` ou na porta passada como argumento. Assim, aceita conexões da própria máquina e da rede local.
 - Se a porta estiver ocupada, o servidor tenta a seguinte.
 - O cliente recebe o endereço e a porta do servidor como argumentos (padrão `127.0.0.1:38905`).
 - Cada conexão é identificada no servidor pelo par `IP:porta` do cliente, que é único enquanto a conexão existir.
 
-## 7. Bibliotecas
+## 8. Bibliotecas
 
 | Biblioteca | Tipo | Uso |
 | --- | --- | --- |
@@ -116,4 +140,4 @@ Todo o estado compartilhado (usuários, salas, partidas) é protegido por **um �
 | `json` | Padrão | Leitura do banco de palavras |
 | `random` | Padrão | Sorteio de palavras e de códigos de sala |
 | `unittest` | Padrão | Testes automatizados |
-| PyNaCl | Externa | Geração e troca de chaves públicas no `CONNECT`, como preparação para a cifragem das mensagens ([protocolo.md](../entrega/protocolo.md), seção 7). **Não** participa da comunicação: a rede é feita só com `socket`. |
+| PyNaCl | Externa | Criptografia: pares de chaves Curve25519 e cifragem/autenticação do corpo das mensagens com `Box` ([protocolo.md](../entrega/protocolo.md), seção 7). Só transforma bytes; a rede é feita só com `socket`. |
